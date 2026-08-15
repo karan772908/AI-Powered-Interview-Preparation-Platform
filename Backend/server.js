@@ -4,10 +4,9 @@ const connectToDB = require("./src/config/database")
 
 connectToDB()
 
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(3003, () => {
-    console.log("server is running on port 3003")
-  })
-}
+const PORT = process.env.PORT || 3003
+app.listen(PORT, () => {
+  console.log(`server is running on port ${PORT}`)
+})
 
 module.exports = app
