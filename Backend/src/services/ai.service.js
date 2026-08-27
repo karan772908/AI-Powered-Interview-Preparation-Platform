@@ -1,6 +1,5 @@
 const { GoogleGenAI } = require("@google/genai")
 const { z } = require("zod")
-const { zodToJsonSchema } = require("zod-to-json-schema")
 const puppeteer = require("puppeteer")
 
 const ai = new GoogleGenAI({
@@ -35,6 +34,25 @@ const interviewReportSchema = z.object({
     })).describe("A day-wise preparation plan for the candidate to follow in order to prepare for the interview effectively"),
     title: z.string().describe("The title of the job for which the interview report is generated"),
 })
+
+// Recursively strips fields from a JSON Schema that Gemini's responseSchema
+// does not support ($schema, additionalProperties, definitions, $ref, etc.)
+function toGeminiSchema(schema) {
+    if (Array.isArray(schema)) {
+        return schema.map(toGeminiSchema)
+    }
+    if (schema && typeof schema === "object") {
+        const cleaned = {}
+        for (const [key, value] of Object.entries(schema)) {
+            if (["$schema", "additionalProperties", "$ref", "definitions", "$defs"].includes(key)) {
+                continue
+            }
+            cleaned[key] = toGeminiSchema(value)
+        }
+        return cleaned
+    }
+    return schema
+}
 
 /**
  * Calls ai.models.generateContent with retry + exponential backoff,
@@ -84,12 +102,17 @@ async function generateInterviewReport({ resume, selfDescription, jobDescription
                         Job Description: ${jobDescription}
 `
 
+    // Zod v4 ships its own JSON Schema converter — no need for the
+    // (incompatible, unmaintained-for-v4) zod-to-json-schema package.
+    const rawSchema = z.toJSONSchema(interviewReportSchema, { target: "openapi-3.0" })
+    const schema = toGeminiSchema(rawSchema)
+
     const response = await generateContentWithRetry({
         model: PRIMARY_MODEL,
         contents: prompt,
         config: {
             responseMimeType: "application/json",
-            responseSchema: zodToJsonSchema(interviewReportSchema),
+            responseSchema: schema,
         }
     })
 
@@ -136,12 +159,15 @@ async function generateResumePdf({ resume, selfDescription, jobDescription }) {
                         The resume should not be so lengthy, it should ideally be 1-2 pages long when converted to PDF. Focus on quality rather than quantity and make sure to include all the relevant information that can increase the candidate's chances of getting an interview call for the given job description.
                     `
 
+    const rawSchema = z.toJSONSchema(resumePdfSchema, { target: "openapi-3.0" })
+    const schema = toGeminiSchema(rawSchema)
+
     const response = await generateContentWithRetry({
         model: PRIMARY_MODEL,
         contents: prompt,
         config: {
             responseMimeType: "application/json",
-            responseSchema: zodToJsonSchema(resumePdfSchema),
+            responseSchema: schema,
         }
     })
 
