@@ -7,6 +7,10 @@ const ai = new GoogleGenAI({
     apiKey: process.env.GOOGLE_GENAI_API_KEY
 })
 
+// Try the fast/cheap model first, fall back to a stable model if it's overloaded.
+// Adjust these to whatever models are currently available in your Google AI Studio console.
+const PRIMARY_MODEL = "gemini-3-flash-preview"
+const FALLBACK_MODEL = "gemini-2.5-flash"
 
 const interviewReportSchema = z.object({
     matchScore: z.number().describe("A score between 0 and 100 indicating how well the candidate's profile matches the job describe"),
@@ -32,8 +36,47 @@ const interviewReportSchema = z.object({
     title: z.string().describe("The title of the job for which the interview report is generated"),
 })
 
-async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
+/**
+ * Calls ai.models.generateContent with retry + exponential backoff,
+ * and falls back to a secondary model if the primary is unavailable.
+ */
+async function generateContentWithRetry(params, { retries = 3, baseDelayMs = 1000 } = {}) {
+    const modelsToTry = [params.model, FALLBACK_MODEL].filter(
+        (m, i, arr) => arr.indexOf(m) === i // dedupe if primary === fallback
+    )
 
+    let lastError
+
+    for (const model of modelsToTry) {
+        for (let attempt = 0; attempt < retries; attempt++) {
+            try {
+                return await ai.models.generateContent({ ...params, model })
+            } catch (err) {
+                lastError = err
+                const status = err?.status || err?.error?.code
+                const isRetryable = status === 503 || status === 429
+
+                console.error(
+                    `generateContent failed (model=${model}, attempt=${attempt + 1}/${retries}, status=${status})`
+                )
+
+                if (isRetryable && attempt < retries - 1) {
+                    const delay = baseDelayMs * Math.pow(2, attempt) // exponential backoff
+                    await new Promise((res) => setTimeout(res, delay))
+                    continue
+                }
+
+                // Not retryable, or out of retries on this model -> try next model (if any)
+                break
+            }
+        }
+    }
+
+    // All models/attempts exhausted
+    throw lastError
+}
+
+async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
 
     const prompt = `Generate an interview report for a candidate with the following details:
                         Resume: ${resume}
@@ -41,8 +84,8 @@ async function generateInterviewReport({ resume, selfDescription, jobDescription
                         Job Description: ${jobDescription}
 `
 
-    const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+    const response = await generateContentWithRetry({
+        model: PRIMARY_MODEL,
         contents: prompt,
         config: {
             responseMimeType: "application/json",
@@ -51,8 +94,6 @@ async function generateInterviewReport({ resume, selfDescription, jobDescription
     })
 
     return JSON.parse(response.text)
-
-
 }
 
 
@@ -95,8 +136,8 @@ async function generateResumePdf({ resume, selfDescription, jobDescription }) {
                         The resume should not be so lengthy, it should ideally be 1-2 pages long when converted to PDF. Focus on quality rather than quantity and make sure to include all the relevant information that can increase the candidate's chances of getting an interview call for the given job description.
                     `
 
-    const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+    const response = await generateContentWithRetry({
+        model: PRIMARY_MODEL,
         contents: prompt,
         config: {
             responseMimeType: "application/json",
